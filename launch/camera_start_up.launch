@@ -6,10 +6,20 @@
         <include file="$(find realsense2_camera)/launch/rs_camera.launch">
             <arg name="enable_sync" value="true"/>
             <arg name="align_depth" value="true"/>
+            <!-- <arg name="color_width" value="640"/>
+            <arg name="color_height" value="480"/>
+            <arg name="depth_width" value="640"/>
+            <arg name="depth_height" value="480"/>
+            <arg name="infra_width" value="640"/>
+            <arg name="infra_height" value="480"/>
+            <arg name="depth_fps" value="10"/>
+            <arg name="color_fps" value="10"/>
+            <arg name="Format" value="10"/> -->
+
         </include>
     </group>
 
-    <node name="camera" pkg="wrist_camera" type="camera.py" output="screen">
+    <node name="wirst_camera" pkg="wrist_camera" type="camera.py" output="screen">
     </node>
 
 </launch>
