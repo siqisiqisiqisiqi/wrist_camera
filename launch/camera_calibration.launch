@@ -1,0 +1,13 @@
+<launch>
+
+    <group ns="realsense">
+        <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+            <arg name="enable_sync" value="true"/>
+            <arg name="align_depth" value="true"/>
+        </include>
+    </group>
+
+    <node name="calibration" pkg="wrist_camera" type="calibration.py" output="screen">
+    </node>
+
+</launch>

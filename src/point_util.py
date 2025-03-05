@@ -4,57 +4,84 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(BASE_DIR)
 
 import numpy as np
+from numpy.linalg import inv
+from sklearn.mixture import GaussianMixture
+import cv2
 
-chess_size = 1  # mm
-extrinsic_param = os.path.join(PARENT_DIR, 'params/E.npz')
+extrinsic_param = os.path.join(PARENT_DIR, 'params/intrinsic_param.npz')
 
 with np.load(extrinsic_param) as X:
-    mtx, dist, Mat, tvecs = [X[i] for i in ('mtx', 'dist', 'Matrix', 'tvec')]
+    mtx, dist = [X[i] for i in ('mtx', 'dist')]
 
-tvec = tvecs * chess_size
 fx = mtx[0, 0]
 fy = mtx[1, 1]
 cx = mtx[0, 2]
 cy = mtx[1, 2]
+camera_matrix = mtx
+dist_coeffs = dist
 
 
-def projection(points, mtx, Mat, tvecs, depth=0):
-    """camera back projection
+def pixel_to_camera(uv_distorted, depths):
+    """
+    Converts a single pixel (u, v) at depth Z into a 3D point (X_c, Y_c, Z_c)
+    in the camera coordinate system, given camera intrinsics and distortion.
 
     Parameters
     ----------
-    points : ndarray
-        keypoints for camera back projection
-    mtx : ndarray
-        camera intrinsic parameter
-    Mat : ndarray
-        camera extrinsic parameter: rotation matrix
-    tvecs : ndarray
-        camera extrinsic parameter: translation vector
-    depth : int, optional
-        depth of the point in the world coordinate frame, by default 0
+    u, v : float
+        Pixel coordinates in the distorted image.
+    Z : float
+        Depth from the camera (the distance along the camera's Z axis).
+    camera_matrix : np.ndarray of shape (3,3)
+        The intrinsic matrix: 
+            [[fx, 0,  cx],
+             [0,  fy, cy],
+             [0,   0,  1 ]]
+    dist_coeffs : np.ndarray of shape (5,) or similar
+        Distortion coefficients [k1, k2, p1, p2, k3].
 
     Returns
     -------
-    result: ndarray
-        point in the world coordinate frame
+    X_c, Y_c, Z_c : float
+        The 3D coordinates of that pixel in the camera frame.
     """
-    num_object = points.shape[0]
-    results = np.zeros_like(points)
-    for i in range(num_object):
-        point = points[i, :].reshape(3, 1)
-        point2 = inv(mtx) @ point
-        predefined_z = depth[i // 2]
-        vec_z = Mat[:, [2]] * predefined_z
-        Mat2 = np.copy(Mat)
-        Mat2[:, [2]] = -1 * point2
-        vec_o = -1 * (vec_z + tvecs)
-        result = inv(Mat2) @ vec_o
-        results[i] = result.squeeze()
-    return results
+    # Pack (u, v) into the shape (N,1,2). Here N=1 since we have one point.
+    # uv_distorted = np.array([[[u, v]]], dtype=np.float32)  # shape (1,1,2)
+    P_c = np.zeros((depths.shape[0], 3))
+    uv_distorted = np.expand_dims(uv_distorted, axis=1)
+
+    # undistortPoints transforms pixel -> normalized coords (x_n, y_n)
+    # in an ideal pinhole camera (f=1, principal point=(0,0)).
+    uv_undist = cv2.undistortPoints(
+        uv_distorted,
+        camera_matrix,
+        dist_coeffs
+    )  # shape (1,1,2)
+
+    for i, Z in enumerate(depths):
+        # Extract normalized coordinates
+        x_n = uv_undist[i, 0, 0]  # x normalized
+        y_n = uv_undist[i, 0, 1]  # y normalized
+
+        # Now, these normalized coords assume fx=1, fy=1, cx=cy=0.
+        # But in a real camera, the actual 3D point in the camera frame is:
+        #   X_c = x_n * Z
+        #   Y_c = y_n * Z
+        #   Z_c = Z
+        #
+        # Because we measure depth = distance along Z_c.
+        # The direction is given by the normalized ray (x_n, y_n, 1),
+        # and we scale it by Z.
+
+        X_c = float(x_n * Z)
+        Y_c = float(y_n * Z)
+        Z_c = float(Z)
+        P_c[i] = np.array([X_c, Y_c, Z_c])
+
+    return P_c
 
 
-def yolo2point(yolo_pose_results):
+def yolo2(yolo_pose_results):
     """Extract the yolo pose estimation information
 
     Parameters
@@ -75,12 +102,11 @@ def yolo2point(yolo_pose_results):
     indices = np.where(conf_mean > confidence_thresdhold)
     keypoints = yolo_pose_results[0].keypoints.data.detach().cpu().numpy()
     num_object = len(indices[0])
-    points = keypoints[indices[0], :, :2]
+    points = keypoints[indices[0], 1, :2]
 
-    # one_vector = np.ones(points.shape[:2])
-    # one_vector = np.expand_dims(one_vector, axis=2)
-    # points = np.concatenate((points, one_vector), axis=2)
-    return points, num_object
+    bboxes = yolo_pose_results[0].boxes.xyxy.detach().cpu().numpy()
+    bboxes = bboxes[indices[0], :]
+    return points, bboxes, num_object
 
 
 def yolo2bbox(yolo_pose_results):
@@ -90,48 +116,56 @@ def yolo2bbox(yolo_pose_results):
     indices = np.where(conf_mean > confidence_thresdhold)
     bboxes = yolo_pose_results[0].boxes.xyxy.detach().cpu().numpy()
     num_object = len(indices[0])
-    points = bboxes[indices[0], :, :2]
+    points = bboxes[indices[0], :]
     return points, num_object
 
 
-def depth_acquisit(points, depth_img, depth_acquisit_scale=[1, 2, 3]):
-    # dim = points.shape[-1]
-    # pts = points.reshape((-1, dim))
-    # depths = np.zeros(pts.shape[0])
+def depth_acquisit(points, depth_map, bboxes):
+    depths = np.zeros(bboxes.shape[0])
+    for i, bbox in enumerate(bboxes):
+        bbox = bbox.astype(np.int32)
+        x_min, y_min, x_max, y_max = bbox
+        roi_depth = depth_map[y_min:y_max, x_min:x_max]
 
-    # # depth_img = depth_img
-    # depth_trans = depth_transform(depth_img)
-    # rows, cols = depth_trans.shape
+        # import matplotlib.pyplot as plt
+        # roi_depth = np.where(roi_depth == 0, np.NaN, roi_depth)
+        # fig, axs = plt.subplots()
+        # axs.imshow(roi_depth, cmap='viridis')
+        # # axs.imshow(depth, cmap='jet')
+        # axs.set_title(f'depth map')
+        # plt.show()
 
-    # for i, point in enumerate(pts):
-    #     y, x = point[:2].astype(int)
-    #     for scale in depth_acquisit_scale:
+        # import matplotlib.pyplot as plt
+        # # Flatten the ROI depth values for histogram
+        # roi_depth_flattened = roi_depth.flatten()
+        # # Plot histogram
+        # plt.figure(figsize=(8, 6))
+        # plt.hist(roi_depth_flattened, bins=50, color='blue', alpha=0.7)
+        # plt.xlabel("Depth Value")
+        # plt.ylabel("Frequency")
+        # plt.title("Depth Distribution in Bounding Box")
+        # plt.grid(True)
+        # plt.show()
 
-    #         row_start = max(0, x - scale)
-    #         row_end = min(rows, x + scale + 1)
-    #         col_start = max(0, y - scale)
-    #         col_end = min(cols, y + scale + 1)
+        roi_depth = np.where(roi_depth == np.NaN, 0, roi_depth)
+        roi_depth_flattened = roi_depth.flatten()
+        roi_depth_filtered = roi_depth_flattened[roi_depth_flattened > 0]
+        roi_depth_filtered = roi_depth_filtered.reshape((-1, 1))
+        gmm = GaussianMixture(n_components=3, random_state=42)
+        gmm.fit(roi_depth_filtered)
 
-    #         neighborhood = depth_trans[row_start:row_end, col_start:col_end]
+        labels = gmm.predict(roi_depth_filtered)
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        # Most frequent Gaussian component
+        dominant_cluster_idx = unique_labels[np.argmax(counts)]
 
-    #         non_zero_values = neighborhood[neighborhood != 0]
-    #         if non_zero_values.size > 0:
-    #             depth = np.mean(non_zero_values)  # Use mean of non-zero values
-    #             break
-    #         else:
-    #             depth = 0
-    #             continue
-    #     depths[i] = depth
-    # return depths, depth_trans
-    pass
+        # Extract depth values from dominant cluster
+        dominant_depth_values = roi_depth_filtered[labels ==
+                                                   dominant_cluster_idx]
 
+        # Estimate the most accurate depth
+        final_depth_gmm = np.mean(dominant_depth_values)
+        depths[i] = final_depth_gmm
+        # print(f"Estimated Dominant Depth (GMM): {final_depth_gmm:.2f}")
 
-def img2robot(point, depth):
-    point = point.reshape((-1, 3))
-    depth = np.round(depth, 2)
-    result = projection(point, mtx, Mat, tvec, depth)
-    result = np.round(result, 2)
-    result[:, -1] = depth
-    result = result.reshape((-1, 3, 3))
-    grasp_point = result[:, 1, :]
-    return grasp_point, orientation, result
+    return depths

@@ -13,7 +13,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from ultralytics import YOLO
 
-from src.point_util import yolo2point, yolo2bbox, depth_acquisit, img2robot
+from src.point_util import yolo2, depth_acquisit, pixel_to_camera
 from wrist_camera.msg import Kpt, Kpts
 
 
@@ -46,16 +46,17 @@ class Camera:
             self.cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
             self.image_t = 1e-9 * data.header.stamp.nsecs + \
                 data.header.stamp.secs
-            rospy.loginfo(f"image size is {self.cv_image.shape}")
+            # rospy.loginfo(f"image size is {self.cv_image.shape}")
         except CvBridgeError as e:
             print(e)
 
     def get_depth(self, data):
         try:
             self.cv_depth = self.bridge.imgmsg_to_cv2(data, "16UC1")
+            self.cv_depth = np.where(self.cv_depth > 500, 0, self.cv_depth)
             self.depth_t = 1e-9 * data.header.stamp.nsecs + \
                 data.header.stamp.secs
-            rospy.loginfo(f"depth image size is {self.cv_depth.shape}")
+            # rospy.loginfo(f"depth image size is {self.cv_depth.shape}")
         except CvBridgeError as e:
             print(e)
 
@@ -74,11 +75,15 @@ class Camera:
         if results[0].keypoints.conf is None:
             rospy.loginfo(f"detect confidence is not enough")
             return None, None
-        points, num_object = yolo2point(results)
-        bbox, _ = yolo2bbox(results)
+        points, bbox, num_object = yolo2(results)
         if num_object == 0:
             rospy.loginfo(f"key point confidence is not enough")
             return None, None
+        
+        for r in results:
+            im_array = r.plot()
+            cv2.imshow("image", im_array)
+            cv2.waitKey(5)
         return points, bbox
 
 
@@ -94,40 +99,41 @@ class Camera:
             img = np.copy(self.cv_image)
             depth_img = np.array(self.cv_depth, dtype=np.float32)
 
-            # # detection module
-            # point, bbox = self.inference(img)
-            # if point is None:
-            #     continue
+            # detection module
+            points, bbox = self.inference(img)
+            if points is None:
+                cv2.imshow("image", img)
+                k = cv2.waitKey(5)
+                if k == ord('q'):
+                    break
+                if k == ord('s'):
+                    cv2.imwrite(
+                        f'{PARENT_DIR}/test/test{save_index}.jpg', self.cv_image)
+                    np.save(
+                        f'{PARENT_DIR}/test/test{save_index}.npy', depth_img)
+                    save_index = save_index + 1
+                continue
 
             # # depth acquisition
-            # depths, _ = depth_acquisit(points, depth_img, bbox)
+            depths = depth_acquisit(points, depth_img, bbox)
 
             # # transformation
-            # pro_points, _ = img2robot(points, depths)
+            P_c = pixel_to_camera(points, depths)
 
             # # publish the keypoints
-            # self.pub_keypoints(pro_points)
+            self.pub_keypoints(P_c)
 
-            cv2.imshow("image", img)
-            k = cv2.waitKey(5)
-            if k == ord('q'):
-                break
-            if k == ord('s'):
-                cv2.imwrite(
-                    f'{PARENT_DIR}/test/test{save_index}.jpg', self.cv_image)
-                np.save(
-                    f'{PARENT_DIR}/test/test{save_index}.npy', depth_img)
-                save_index = save_index + 1
-            # depth_normalized = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX)
-            # depth_normalized = np.uint8(depth_normalized)
-
-            # # Apply a colormap for better visualization
-            # depth_colormap = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-
-            # Show the depth image
-            # cv2.imshow("Depth Image", depth_colormap)
-            # cv2.waitKey(1)
-            # self.rate.sleep()
+            # cv2.imshow("image", img)
+            # k = cv2.waitKey(5)
+            # if k == ord('q'):
+            #     break
+            # if k == ord('s'):
+            #     cv2.imwrite(
+            #         f'{PARENT_DIR}/test/test{save_index}.jpg', self.cv_image)
+            #     np.save(
+            #         f'{PARENT_DIR}/test/test{save_index}.npy', depth_img)
+            #     save_index = save_index + 1
+            self.rate.sleep()
 
 
 if __name__ == "__main__":
