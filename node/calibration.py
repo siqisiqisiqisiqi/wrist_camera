@@ -28,8 +28,8 @@ class Calibration:
         self.mtx = None
         self.dist = None
         self.index = 0
-        # self.chess_size = 22.8  # unit: mm
-        self.chess_size = 12.93  # unit: mm
+        self.chess_size = 22.8  # unit: mm
+        # self.chess_size = 12.93  # unit: mm
         self.camera_poses = []
 
         # Init subscribers

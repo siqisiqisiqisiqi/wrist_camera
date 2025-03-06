@@ -1,0 +1,7 @@
+# Request (Empty, since the robot just triggers detection)
+---
+
+# Response (Detected object coordinates for multiple objects)
+float32[] x
+float32[] y
+float32[] z

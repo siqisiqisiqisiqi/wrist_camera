@@ -35,3 +35,10 @@
 # plt.legend()
 # plt.grid(True)
 # plt.show()
+
+import numpy as np
+
+robot_pose = "./EIH_calibration/camera_pose.npy"
+data = np.load(robot_pose)
+
+print(data)
